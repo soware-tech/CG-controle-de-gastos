@@ -151,7 +151,7 @@
                             <tr>
                                 <th class="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Data</th>
                                 <th class="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Usuário</th>
-                                <th class="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Local/Cat</th>
+                                <th class="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Estabelecimento</th>
                                 <th class="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Valor</th>
                                 <th class="px-6 py-3 w-10"></th>
                             </tr>
