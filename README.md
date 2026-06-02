@@ -1,749 +1,1604 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { 
-  PlusCircle, 
-  Trash2, 
-  ChevronLeft, 
-  ChevronRight, 
-  ScanQrCode, 
-  Loader2, 
-  Sparkles, 
-  Camera, 
-  Image as ImageIcon, 
-  CheckCircle2,
-  TrendingUp,
-  Users,
-  X,
-  Maximize,
-  UserPlus,
-  UserMinus,
-  Settings,
-  CreditCard,
-  Receipt,
-  Wallet,
-  CalendarDays,
-  BarChart3,
-  Files,
-  Save,
-  RotateCcw,
-  Tag
-} from 'lucide-react';
-
-const apiKey = "";
-
-const App = () => {
-  const [activeTab, setActiveTab] = useState('lancamentos');
-  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
-  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanInput, setScanInput] = useState('');
-  const [feedback, setFeedback] = useState(null);
-  const [showScanner, setShowScanner] = useState(false);
-  const [showConfigAdmin, setShowConfigAdmin] = useState(false);
-  const [newUser, setNewUser] = useState('');
-  const [newCategory, setNewCategory] = useState('');
-  
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-
-  const [expenses, setExpenses] = useState(() => {
-    const saved = localStorage.getItem('expenses_v9');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  const [users, setUsers] = useState(() => {
-    const saved = localStorage.getItem('users_v9');
-    return saved ? JSON.parse(saved) : [
-      { id: '1', name: 'Aline', cards: ['1234'] },
-      { id: '2', name: 'Roney', cards: ['5678'] }
-    ];
-  });
-
-  const [categories, setCategories] = useState(() => {
-    const saved = localStorage.getItem('categories_v9');
-    return saved ? JSON.parse(saved) : [
-      'Aluguel', 'Beleza', 'Casa', 'Combustível', 'Energia', 'Estacionamento', 
-      'Manutenção Carro', 'Feira', 'Fast Food', 'Delivery', 'Gás', 
-      'Mercado', 'Farmácia', 'Internet', 'Celular', 'Padaria', 'Pets'
-    ];
-  });
-
-  const [pendingExpenses, setPendingExpenses] = useState([]);
-
-  useEffect(() => {
-    localStorage.setItem('expenses_v9', JSON.stringify(expenses));
-  }, [expenses]);
-
-  useEffect(() => {
-    localStorage.setItem('users_v9', JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem('categories_v9', JSON.stringify(categories));
-  }, [categories]);
-
-  const showToast = (message) => {
-    setFeedback(message);
-    setTimeout(() => setFeedback(null), 3000);
-  };
-
-  // --- LÓGICA DE IA (GEMINI) ---
-  const callGemini = async (prompt, base64Image = null) => {
-    setIsScanning(true);
-    const userContext = users.map(u => `${u.name} (finais: ${u.cards.join(', ')})`).join('; ');
-    
-    const payload = {
-      contents: [{
-        parts: [
-          { text: prompt },
-          ...(base64Image ? [{ inlineData: { mimeType: "image/png", data: base64Image } }] : [])
-        ]
-      }],
-      systemInstruction: {
-        parts: [{
-          text: `Você é um extrator de recibos. Analise os dados e retorne APENAS um JSON válido.
-          Usuários: ${userContext}. Categorias: ${categories.join(', ')}.
-          O JSON deve ser: {"estabelecimento": "string", "valor": number, "usuario": "nome_do_usuario", "categoria": "categoria_mais_proxima"}`
-        }]
-      },
-      generationConfig: { responseMimeType: "application/json" }
-    };
-
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      const result = JSON.parse(data.candidates[0].content.parts[0].text);
-      return result;
-    } catch (error) {
-      console.error("Erro na IA:", error);
-      showToast("Erro ao processar com IA");
-      return null;
-    } finally {
-      setIsScanning(false);
-    }
-  };
-
-  const addPendingItem = (data) => {
-    if (!data) return;
-    const newItem = {
-      id: Date.now() + Math.random(),
-      user: data.usuario || users[0].name,
-      description: data.estabelecimento || "Nova Compra",
-      category: categories.includes(data.categoria) ? data.categoria : categories[0],
-      amount: data.valor || 0,
-      date: new Date().toISOString().split('T')[0]
-    };
-    setPendingExpenses(prev => [newItem, ...prev]);
-    showToast("Mapeamento concluído!");
-  };
-
-  // --- FERRAMENTAS DE CAPTURA ---
-
-  // 1. Scanner ao Vivo
-  const startScanner = async () => {
-    setShowScanner(true);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      if (videoRef.current) videoRef.current.srcObject = stream;
-    } catch (err) {
-      showToast("Erro ao abrir câmera");
-      setShowScanner(false);
-    }
-  };
-
-  const capturePhoto = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-    const context = canvasRef.current.getContext('2d');
-    canvasRef.current.width = videoRef.current.videoWidth;
-    canvasRef.current.height = videoRef.current.videoHeight;
-    context.drawImage(videoRef.current, 0, 0);
-    
-    const base64 = canvasRef.current.toDataURL('image/png').split(',')[1];
-    
-    // Parar câmera
-    const stream = videoRef.current.srcObject;
-    stream.getTracks().forEach(track => track.stop());
-    setShowScanner(false);
-
-    showToast("Lendo Cupom...");
-    const result = await callGemini("Extraia os dados deste cupom fiscal.", base64);
-    addPendingItem(result);
-  };
-
-  // 2. Upload de Arquivos
-  const handleFileUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const base64 = event.target.result.split(',')[1];
-      showToast("Analisando imagem...");
-      const result = await callGemini("Extraia os dados desta imagem de recibo.", base64);
-      addPendingItem(result);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // 3. Link de Nota
-  const handleLinkProcess = async () => {
-    if (!scanInput.trim()) return;
-    showToast("Acessando link...");
-    const result = await callGemini(`Extraia os dados de gasto deste link de nota fiscal: ${scanInput}`);
-    addPendingItem(result);
-    setScanInput('');
-  };
-
-  // --- OUTRAS FUNÇÕES ---
-  const handleManualSubmit = (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const newExp = {
-      id: Date.now(),
-      user: formData.get('user'),
-      category: formData.get('category'),
-      description: formData.get('description'),
-      amount: parseFloat(formData.get('amount')),
-      date: new Date().toISOString().split('T')[0]
-    };
-    setExpenses([newExp, ...expenses]);
-    e.target.reset();
-    showToast("Gasto salvo!");
-  };
-
-  const confirmPending = (id) => {
-    const item = pendingExpenses.find(p => p.id === id);
-    if (item) {
-      const { id: oldId, ...cleanItem } = item;
-      setExpenses([{...cleanItem, id: Date.now()}, ...expenses]);
-      setPendingExpenses(pendingExpenses.filter(p => p.id !== id));
-    }
-  };
-
-  const removePending = (id) => {
-    setPendingExpenses(pendingExpenses.filter(p => p.id !== id));
-  };
-
-  const filteredExpenses = useMemo(() => {
-    return expenses.filter(e => {
-      const d = new Date(e.date + 'T00:00:00');
-      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
-    });
-  }, [expenses, currentMonth, currentYear]);
-
-  const monthNames = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
-
-  return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-900 pb-20 font-['Inter']">
-      
-      {/* NAVBAR */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-40">
-        <div className="max-w-6xl mx-auto px-4 flex justify-between items-center h-16">
-          <div className="flex items-center gap-2">
-            <div className="bg-emerald-600 p-1.5 rounded text-white font-bold text-sm">CG</div>
-            <span className="font-bold text-lg text-slate-700 hidden sm:block">Controle de Gastos</span>
-          </div>
-          <div className="flex bg-slate-100 p-1 rounded-xl">
-            <button onClick={() => setActiveTab('lancamentos')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all uppercase ${activeTab === 'lancamentos' ? 'bg-white shadow-sm text-emerald-700' : 'text-slate-400'}`}>Lançar</button>
-            <button onClick={() => setActiveTab('dashboard')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all uppercase ${activeTab === 'dashboard' ? 'bg-white shadow-sm text-emerald-700' : 'text-slate-400'}`}>Mensal</button>
-            <button onClick={() => setActiveTab('anual')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all uppercase ${activeTab === 'anual' ? 'bg-white shadow-sm text-emerald-700' : 'text-slate-400'}`}>Anual</button>
-          </div>
-          <button onClick={() => setShowConfigAdmin(true)} className="p-2 text-slate-400 hover:text-emerald-600 transition-colors">
-            <Settings size={20} />
-          </button>
-        </div>
-      </nav>
-
-      {/* HEADER CALENDÁRIO */}
-      <div className="bg-emerald-700 text-white py-4 shadow-inner">
-        <div className="max-w-5xl mx-auto px-4 flex items-center justify-between">
-          <button onClick={() => {
-            if(currentMonth === 0) { setCurrentMonth(11); setCurrentYear(currentYear-1); }
-            else { setCurrentMonth(currentMonth-1); }
-          }} className="p-2 hover:bg-white/10 rounded-full"><ChevronLeft /></button>
-          <div className="text-center">
-            <h2 className="font-black text-lg uppercase tracking-tight">{activeTab === 'anual' ? 'Visão Anual' : monthNames[currentMonth]}</h2>
-            <p className="text-[10px] opacity-70 font-black tracking-widest uppercase">{currentYear}</p>
-          </div>
-          <button onClick={() => {
-            if(currentMonth === 11) { setCurrentMonth(0); setCurrentYear(currentYear+1); }
-            else { setCurrentMonth(currentMonth+1); }
-          }} className="p-2 hover:bg-white/10 rounded-full"><ChevronRight /></button>
-        </div>
-      </div>
-
-      <main className="max-w-5xl mx-auto p-4 md:p-6">
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CG - Controle de Gastos Inteligente (PWA Native Look)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Biblioteca OCR Tesseract.js para leitura local de imagens sem uso de servidores ou APIs -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
         
-        {activeTab === 'lancamentos' && (
-          <div className="space-y-6">
-            
-            {/* FERRAMENTAS IA */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-white border border-emerald-100 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="bg-emerald-100 p-2 rounded-xl text-emerald-600"><Camera size={20}/></div>
-                  <h4 className="text-xs font-black text-slate-700 uppercase">Scanner ao Vivo</h4>
-                </div>
-                <button onClick={startScanner} className="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs uppercase flex items-center justify-center gap-2 hover:bg-emerald-700 shadow-sm active:scale-95 transition-all">
-                  <Maximize size={14}/> Abrir Câmera
-                </button>
-              </div>
-
-              <div className="bg-white border border-blue-100 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="bg-blue-100 p-2 rounded-xl text-blue-600"><Files size={20}/></div>
-                  <h4 className="text-xs font-black text-slate-700 uppercase">Upload</h4>
-                </div>
-                <label className="w-full bg-blue-50 border-2 border-dashed border-blue-200 text-blue-700 rounded-xl text-xs font-bold py-2.5 flex items-center justify-center gap-2 cursor-pointer hover:bg-blue-100 transition-all">
-                  <ImageIcon size={14}/> Galeria de Fotos
-                  <input type="file" className="hidden" accept="image/*" onChange={handleFileUpload} />
-                </label>
-              </div>
-
-              <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="bg-slate-100 p-2 rounded-xl text-slate-600"><ScanQrCode size={20}/></div>
-                  <h4 className="text-xs font-black text-slate-700 uppercase">Link de Nota</h4>
-                </div>
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    placeholder="Cole o link..." 
-                    value={scanInput}
-                    onChange={(e) => setScanInput(e.target.value)}
-                    className="flex-1 bg-slate-50 border border-slate-100 rounded-lg text-xs p-2 focus:ring-1 focus:ring-slate-300 outline-none"
-                  />
-                  <button onClick={handleLinkProcess} className="bg-slate-800 text-white px-3 py-2 rounded-lg font-bold text-xs hover:bg-slate-700 active:scale-95 transition-all">OK</button>
-                </div>
-              </div>
-            </div>
-
-            {/* PENDENTES IA */}
-            {pendingExpenses.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden shadow-md">
-                <div className="p-4 bg-amber-100/50 flex justify-between items-center border-b border-amber-200">
-                  <h3 className="text-xs font-black text-amber-800 uppercase flex items-center gap-2">
-                    <Sparkles size={14} className="animate-pulse" /> Validar Mapeamento IA ({pendingExpenses.length})
-                  </h3>
-                  <button onClick={() => {
-                    pendingExpenses.forEach(p => confirmPending(p.id));
-                  }} className="bg-amber-600 text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase flex items-center gap-1 hover:bg-amber-700">
-                    <Save size={12}/> Salvar Todos
-                  </button>
-                </div>
-                <div className="p-2 space-y-2">
-                  {pendingExpenses.map(p => (
-                    <div key={p.id} className="bg-white p-3 rounded-xl border border-amber-100 grid grid-cols-1 md:grid-cols-6 gap-2 items-center">
-                      <div className="md:col-span-1">
-                        <select 
-                          className="w-full text-[10px] font-bold border-slate-100 rounded bg-slate-50 uppercase"
-                          value={p.user}
-                          onChange={(e) => {
-                            setPendingExpenses(prev => prev.map(item => item.id === p.id ? {...item, user: e.target.value} : item));
-                          }}
-                        >
-                          {users.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
-                        </select>
-                      </div>
-                      <div className="md:col-span-2">
-                        <input 
-                          className="w-full text-xs border-slate-100 rounded p-1 font-medium"
-                          value={p.description}
-                          onChange={(e) => {
-                            setPendingExpenses(prev => prev.map(item => item.id === p.id ? {...item, description: e.target.value} : item));
-                          }}
-                        />
-                      </div>
-                      <div className="md:col-span-1">
-                        <select 
-                          className="w-full text-[10px] border-slate-100 rounded bg-slate-50"
-                          value={p.category}
-                          onChange={(e) => {
-                            setPendingExpenses(prev => prev.map(item => item.id === p.id ? {...item, category: e.target.value} : item));
-                          }}
-                        >
-                          {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                      </div>
-                      <div className="text-right font-black text-xs text-amber-700">R$ {p.amount.toFixed(2)}</div>
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => removePending(p.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>
-                        <button onClick={() => confirmPending(p.id)} className="text-emerald-500 hover:scale-110 transition-transform"><CheckCircle2 size={16}/></button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* FORMULÁRIO MANUAL */}
-            <form onSubmit={handleManualSubmit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Usuário</label>
-                <select name="user" className="w-full bg-slate-50 border-slate-200 rounded-lg text-sm p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all">
-                  {users.map(u => <option key={u.id} value={u.name}>{u.name}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Categoria</label>
-                <select name="category" className="w-full bg-slate-50 border-slate-200 rounded-lg text-sm p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all">
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Local</label>
-                <input name="description" required type="text" placeholder="Ex: Mercado Livre" className="w-full bg-slate-50 border-slate-200 rounded-lg text-sm p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all" />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Valor R$</label>
-                <input name="amount" required step="0.01" type="number" placeholder="0,00" className="w-full border-emerald-200 bg-emerald-50/30 rounded-lg text-sm p-2 font-bold outline-none focus:ring-1 focus:ring-emerald-500 transition-all" />
-              </div>
-              <button type="submit" className="bg-emerald-600 text-white font-bold py-2.5 rounded-lg text-sm uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all">Salvar</button>
-            </form>
-
-            {/* TABELA GASTOS */}
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
-                <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Registos do Mês</h3>
-                <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-bold">{filteredExpenses.length} itens</span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-50">
-                    <tr>
-                      <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Data</th>
-                      <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Usuário</th>
-                      <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase">Local/Cat</th>
-                      <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase text-right">Valor</th>
-                      <th className="px-6 py-3 w-10"></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {filteredExpenses.map(e => (
-                      <tr key={e.id} className="hover:bg-slate-50/80 transition-colors">
-                        <td className="px-6 py-4 text-xs text-slate-400">{new Date(e.date + 'T00:00:00').toLocaleDateString('pt-BR', {day:'2-digit', month:'2-digit'})}</td>
-                        <td className="px-6 py-4">
-                          <span className="text-[10px] font-black uppercase text-slate-600 px-2 py-0.5 bg-slate-100 rounded-md">{e.user}</span>
-                        </td>
-                        <td className="px-6 py-4">
-                          <p className="text-xs font-bold text-slate-800 leading-none mb-1">{e.description}</p>
-                          <p className="text-[9px] text-slate-400 uppercase font-bold flex items-center gap-1">
-                            <Tag size={8} /> {e.category}
-                          </p>
-                        </td>
-                        <td className="px-6 py-4 text-sm font-black text-right text-slate-900">R$ {e.amount.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td>
-                        <td className="px-6 py-4">
-                          <button onClick={() => setExpenses(expenses.filter(item => item.id !== e.id))} className="text-slate-300 hover:text-red-500 transition-colors"><Trash2 size={14}/></button>
-                        </td>
-                      </tr>
-                    ))}
-                    {filteredExpenses.length === 0 && (
-                      <tr>
-                        <td colSpan="5" className="px-6 py-12 text-center text-slate-300 italic text-xs">Nenhum registro encontrado.</td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'dashboard' && (
-          <div className="space-y-6">
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="flex-1 grid grid-cols-2 gap-4">
-                {users.map(u => {
-                  const total = filteredExpenses.filter(e => e.user === u.name).reduce((sum, curr) => sum + curr.amount, 0);
-                  return (
-                    <div key={u.id} className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-3">
-                      <div className="bg-slate-50 p-3 rounded-2xl text-slate-400"><Users size={20}/></div>
-                      <div>
-                        <p className="text-[9px] font-black text-slate-400 uppercase mb-0.5 tracking-wider">{u.name}</p>
-                        <h4 className="text-base font-black text-slate-800 tracking-tight">R$ {total.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</h4>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="md:w-64 bg-emerald-50 border border-emerald-100 p-4 rounded-2xl shadow-sm flex items-center justify-between">
-                <div>
-                  <h3 className="text-[9px] font-black text-emerald-600 uppercase tracking-widest mb-0.5">Gasto Mensal</h3>
-                  <div className="text-xl font-black text-emerald-900 tracking-tighter">
-                    R$ {filteredExpenses.reduce((sum, curr) => sum + curr.amount, 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
-                  </div>
-                </div>
-                <div className="bg-emerald-600 p-3 rounded-xl text-white shadow-lg shadow-emerald-200"><Wallet size={20}/></div>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-              <h3 className="font-black text-slate-700 text-xs uppercase tracking-widest flex items-center gap-2 mb-8">
-                <TrendingUp size={16} className="text-emerald-500" /> Categorias do Mês
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
-                {categories.map(cat => {
-                  const catTotal = filteredExpenses.filter(e => e.category === cat).reduce((sum, curr) => sum + curr.amount, 0);
-                  const total = filteredExpenses.reduce((sum, curr) => sum + curr.amount, 0);
-                  const percent = total > 0 ? (catTotal / total) * 100 : 0;
-                  if (catTotal === 0) return null;
-                  return (
-                    <div key={cat} className="space-y-2">
-                      <div className="flex justify-between text-[10px] font-black uppercase">
-                        <span className="text-slate-500 tracking-wide">{cat}</span>
-                        <span className="text-slate-900">R$ {catTotal.toLocaleString('pt-BR')}</span>
-                      </div>
-                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                        <div className="bg-emerald-500 h-full transition-all duration-1000 ease-out rounded-full" style={{ width: `${percent}%` }}></div>
-                      </div>
-                    </div>
-                  );
-                }).filter(x => x !== null)}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'anual' && (
-          <div className="space-y-6">
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="flex-1 grid grid-cols-2 gap-4">
-                {users.map(u => {
-                  const yearly = expenses.filter(e => new Date(e.date + 'T00:00:00').getFullYear() === currentYear && e.user === u.name).reduce((sum, curr) => sum + curr.amount, 0);
-                  return (
-                    <div key={u.id} className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                      <p className="text-[10px] font-black text-slate-400 uppercase mb-1 tracking-widest">{u.name}</p>
-                      <h4 className="text-2xl font-black text-slate-800 tracking-tighter">R$ {yearly.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</h4>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="md:w-72 bg-slate-900 text-white p-6 rounded-2xl shadow-xl flex items-center justify-between">
-                <div>
-                  <h3 className="text-[10px] font-black text-emerald-400 uppercase tracking-[0.2em] mb-1">Total {currentYear}</h3>
-                  <div className="text-3xl font-black tracking-tighter">
-                    R$ {expenses.filter(e => new Date(e.date + 'T00:00:00').getFullYear() === currentYear).reduce((sum, curr) => sum + curr.amount, 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
-                  </div>
-                </div>
-                <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-md"><CalendarDays size={24}/></div>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-              <h3 className="font-black text-slate-700 text-xs uppercase tracking-widest flex items-center gap-2 mb-10">
-                <BarChart3 size={16} className="text-emerald-500" /> Evolução Mensal
-              </h3>
-              <div className="flex items-end justify-between h-48 gap-2 px-2">
-                {monthNames.map((m, i) => {
-                  const mTotal = expenses.filter(e => {
-                    const d = new Date(e.date + 'T00:00:00');
-                    return d.getMonth() === i && d.getFullYear() === currentYear;
-                  }).reduce((sum, curr) => sum + curr.amount, 0);
-                  const yearlyMax = Math.max(...monthNames.map((_, idx) => expenses.filter(e => {
-                    const d = new Date(e.date + 'T00:00:00');
-                    return d.getMonth() === idx && d.getFullYear() === currentYear;
-                  }).reduce((sum, curr) => sum + curr.amount, 0)), 1);
-                  const height = (mTotal / yearlyMax) * 100;
-                  return (
-                    <div key={m} className="flex-1 flex flex-col items-center group relative h-full justify-end">
-                      <div className="absolute -top-8 bg-slate-800 text-white text-[9px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity z-10 font-bold whitespace-nowrap">
-                        R$ {mTotal.toLocaleString('pt-BR')}
-                      </div>
-                      <div 
-                        className={`w-full rounded-t-md transition-all duration-700 ease-out ${i === currentMonth ? 'bg-emerald-500' : 'bg-slate-100 group-hover:bg-emerald-100'}`} 
-                        style={{ height: `${height}%`, minHeight: mTotal > 0 ? '4px' : '0' }}
-                      ></div>
-                      <span className={`text-[9px] mt-3 font-black uppercase ${i === currentMonth ? 'text-emerald-600' : 'text-slate-400'}`}>{m.substring(0,3)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* SCANNER MODAL */}
-      {showScanner && (
-        <div className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center">
-          <div className="relative w-full max-w-lg aspect-[3/4] bg-slate-900 overflow-hidden">
-            <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-            <div className="absolute inset-0 border-2 border-emerald-500/30 m-12 pointer-events-none">
-              <div className="absolute top-0 left-0 w-full h-1 bg-emerald-500/50 animate-scan-line shadow-[0_0_15px_rgba(16,185,129,0.5)]"></div>
-            </div>
-            <div className="absolute bottom-10 left-0 right-0 flex justify-around items-center px-10">
-              <button onClick={() => {
-                const stream = videoRef.current.srcObject;
-                stream.getTracks().forEach(track => track.stop());
-                setShowScanner(false);
-              }} className="p-4 bg-white/10 rounded-full text-white backdrop-blur-md">
-                <X size={24}/>
-              </button>
-              <button onClick={capturePhoto} className="w-20 h-20 bg-white rounded-full border-4 border-emerald-500 flex items-center justify-center shadow-2xl active:scale-90 transition-all">
-                <div className="w-16 h-16 rounded-full border-2 border-slate-200 bg-white"></div>
-              </button>
-              <div className="w-14"></div>
-            </div>
-          </div>
-          <canvas ref={canvasRef} className="hidden" />
-          <p className="text-white/60 text-[10px] font-black uppercase tracking-[0.3em] mt-8">Posicione o Cupom Fiscal</p>
-        </div>
-      )}
-
-      {/* CONFIG MODAL */}
-      {showConfigAdmin && (
-        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="font-black text-slate-800 uppercase tracking-widest text-sm flex items-center gap-2">
-                <Settings size={20} className="text-emerald-600" /> Painel de Controle
-              </h3>
-              <button onClick={() => setShowConfigAdmin(false)} className="text-slate-400 hover:text-red-500 transition-colors"><X size={24}/></button>
-            </div>
-            
-            <div className="p-8 space-y-10 max-h-[70vh] overflow-y-auto no-scrollbar">
-              
-              <section className="space-y-6">
-                <div className="flex items-center justify-between border-b border-emerald-100 pb-2">
-                  <h4 className="text-[10px] font-black text-emerald-600 uppercase tracking-[0.2em] flex items-center gap-2">
-                    <Users size={14}/> Gerenciar Usuários
-                  </h4>
-                </div>
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    value={newUser}
-                    onChange={(e) => setNewUser(e.target.value)}
-                    placeholder="Nome do Usuário..." 
-                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-2 focus:ring-emerald-500/20"
-                  />
-                  <button 
-                    onClick={() => {
-                      if(newUser.trim()) {
-                        setUsers([...users, { id: Date.now().toString(), name: newUser, cards: [] }]);
-                        setNewUser('');
-                      }
-                    }}
-                    className="bg-emerald-600 text-white px-5 rounded-xl font-bold text-xs uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all"
-                  >
-                    <UserPlus size={16}/>
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {users.map(u => (
-                    <div key={u.id} className="border border-slate-100 rounded-2xl p-4 bg-slate-50/50 hover:bg-white transition-colors group">
-                      <div className="flex justify-between items-center mb-4">
-                        <span className="font-black text-xs uppercase text-slate-700 tracking-wide">{u.name}</span>
-                        <button onClick={() => setUsers(users.filter(x => x.id !== u.id))} className="text-slate-200 hover:text-red-500 group-hover:text-slate-400 transition-colors">
-                          <UserMinus size={14}/>
-                        </button>
-                      </div>
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap gap-2">
-                          {u.cards.map((c, idx) => (
-                            <span key={idx} className="bg-white border border-slate-200 px-2 py-1 rounded-lg text-[9px] font-bold text-slate-500 flex items-center gap-1.5 shadow-sm">
-                              <CreditCard size={10} /> ****{c}
-                              <button onClick={() => {
-                                const newUsers = [...users];
-                                const userIdx = newUsers.findIndex(x => x.id === u.id);
-                                newUsers[userIdx].cards.splice(idx, 1);
-                                setUsers(newUsers);
-                              }} className="text-slate-300 hover:text-red-500"><X size={10}/></button>
-                            </span>
-                          ))}
-                        </div>
-                        <input 
-                          type="text" 
-                          maxLength="4"
-                          placeholder="Adic. final cartão (4 dígitos)"
-                          onKeyDown={(e) => {
-                            if(e.key === 'Enter' && e.target.value.length === 4) {
-                              const newUsers = [...users];
-                              const userIdx = newUsers.findIndex(x => x.id === u.id);
-                              newUsers[userIdx].cards.push(e.target.value);
-                              setUsers(newUsers);
-                              e.target.value = '';
-                            }
-                          }}
-                          className="w-full text-[10px] bg-white border border-slate-100 rounded-lg p-2 outline-none focus:ring-1 focus:ring-emerald-500"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="space-y-6">
-                <div className="flex items-center justify-between border-b border-emerald-100 pb-2">
-                  <h4 className="text-[10px] font-black text-emerald-600 uppercase tracking-[0.2em] flex items-center gap-2">
-                    <Tag size={14}/> Gerenciar Categorias
-                  </h4>
-                </div>
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    value={newCategory}
-                    onChange={(e) => setNewCategory(e.target.value)}
-                    placeholder="Nova Categoria..." 
-                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-2 focus:ring-emerald-500/20"
-                  />
-                  <button 
-                    onClick={() => {
-                      if(newCategory.trim()) {
-                        setCategories([...categories, newCategory]);
-                        setNewCategory('');
-                      }
-                    }}
-                    className="bg-emerald-600 text-white px-5 rounded-xl font-bold text-xs uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all"
-                  >
-                    ADD
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-2 p-4 bg-slate-50 rounded-[1.5rem] border border-slate-100">
-                  {categories.map(cat => (
-                    <div key={cat} className="bg-white border border-slate-200 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase text-slate-600 flex items-center gap-3 shadow-sm group">
-                      {cat}
-                      <button onClick={() => setCategories(categories.filter(c => c !== cat))} className="text-slate-200 group-hover:text-red-500 transition-colors">
-                        <X size={12}/>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-            </div>
-            
-            <div className="p-8 bg-slate-50 border-t border-slate-100 text-center">
-              <button onClick={() => setShowConfigAdmin(false)} className="bg-slate-800 text-white px-10 py-3 rounded-2xl font-bold text-xs uppercase shadow-lg hover:bg-slate-700 transition-all active:scale-95">Fechar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* FEEDBACK TOAST */}
-      {feedback && (
-        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] bg-slate-900 text-white text-[10px] font-black px-6 py-3 rounded-full flex items-center gap-3 uppercase border border-white/10 shadow-2xl animate-in slide-in-from-bottom-5">
-          {isScanning ? <Loader2 size={14} className="animate-spin text-emerald-400" /> : <CheckCircle2 size={14} className="text-emerald-400" />} 
-          {feedback}
-        </div>
-      )}
-
-      <style>{`
         @keyframes scan-line {
-          0% { top: 0%; }
-          100% { top: 100%; }
+            0% { top: 0%; }
+            100% { top: 100%; }
         }
         .animate-scan-line {
-          animation: scan-line 2s linear infinite;
+            position: absolute;
+            width: 100%;
+            height: 2px;
+            background: rgba(16, 185, 129, 0.5);
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.5);
+            animation: scan-line 2s linear infinite;
         }
+
+        .tab-active {
+            color: #059669; /* emerald-600 */
+        }
+        
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-      `}</style>
-    </div>
-  );
-};
 
-export default App;
+        /* Simulação elegante de tela de celular para visualização em telas largas */
+        @media (min-width: 640px) {
+            .app-shell {
+                max-width: 480px;
+                margin: 0 auto;
+                min-height: 100vh;
+                position: relative;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+                border-left: 1px border-slate-200;
+                border-right: 1px border-slate-200;
+                background-color: #ffffff;
+            }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen">
+
+    <!-- APP SHELL CONTAINER -->
+    <div class="app-shell bg-white flex flex-col min-h-screen pb-20">
+
+        <!-- HEADER ESTILO NATIVO -->
+        <header class="bg-emerald-700 text-white sticky top-0 z-40 px-5 py-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <div class="bg-white/10 p-2 rounded-xl backdrop-blur-md">
+                        <i data-lucide="wallet" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xs font-black tracking-widest uppercase opacity-75">Meu Controle</h1>
+                        <p class="text-sm font-extrabold tracking-tight" id="display-date-title">Janeiro, 2026</p>
+                    </div>
+                </div>
+                
+                <!-- Navegador de Período Rápido -->
+                <div class="flex items-center bg-white/10 rounded-xl p-1 gap-1">
+                    <button onclick="changePeriod(-1)" class="p-1.5 hover:bg-white/10 rounded-lg transition-colors">
+                        <i data-lucide="chevron-left" class="w-4 h-4"></i>
+                    </button>
+                    <button onclick="changePeriod(1)" class="p-1.5 hover:bg-white/10 rounded-lg transition-colors">
+                        <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- MAIN SCROLL VIEW -->
+        <main class="flex-1 overflow-y-auto px-5 py-6 space-y-6">
+
+            <!-- ========================================== -->
+            <!-- ABA 1: LANÇAMENTOS (CENTRAL DE CAPTURA) -->
+            <!-- ========================================== -->
+            <div id="section-lancamentos" class="space-y-6 animate-in fade-in duration-200">
+                
+                <div class="space-y-3">
+                    <h2 class="text-xs font-black text-slate-400 uppercase tracking-widest">Ferramentas Inteligentes</h2>
+                    <div class="grid grid-cols-3 gap-3">
+                        <button onclick="startScanner()" class="bg-emerald-50 hover:bg-emerald-100/80 border border-emerald-100 rounded-2xl p-3 flex flex-col items-center justify-center text-center transition-all active:scale-95">
+                            <div class="bg-emerald-600 text-white p-2 rounded-xl mb-2">
+                                <i data-lucide="scan-qr-code" class="w-5 h-5"></i>
+                            </div>
+                            <span class="text-[9px] font-black text-slate-700 uppercase tracking-wide">Scanner</span>
+                        </button>
+
+                        <label class="bg-blue-50 hover:bg-blue-100/80 border border-blue-100 rounded-2xl p-3 flex flex-col items-center justify-center text-center transition-all active:scale-95 cursor-pointer">
+                            <input type="file" id="file-upload" class="hidden" accept="image/*" multiple onchange="handleFileUpload(event)" />
+                            <div class="bg-blue-600 text-white p-2 rounded-xl mb-2">
+                                <i data-lucide="image" class="w-5 h-5"></i>
+                            </div>
+                            <span class="text-[9px] font-black text-slate-700 uppercase tracking-wide">Upload</span>
+                        </label>
+
+                        <button onclick="focusLinkInput()" class="bg-purple-50 hover:bg-purple-100/80 border border-purple-100 rounded-2xl p-3 flex flex-col items-center justify-center text-center transition-all active:scale-95">
+                            <div class="bg-purple-600 text-white p-2 rounded-xl mb-2">
+                                <i data-lucide="link" class="w-5 h-5"></i>
+                            </div>
+                            <span class="text-[9px] font-black text-slate-700 uppercase tracking-wide">Link NFC-e</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Campo de Entrada de Nota Oculto/Expansível -->
+                <div id="link-input-container" class="hidden bg-slate-50 border border-slate-200 rounded-2xl p-4 animate-in slide-in-from-top-2 duration-200 space-y-3">
+                    <div class="flex justify-between items-center">
+                        <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Colar Cupom ou Chave</span>
+                        <button onclick="toggleElement('link-input-container', false)" class="text-slate-400 hover:text-slate-600">
+                            <i data-lucide="x" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                    <div class="flex gap-2">
+                        <input 
+                            type="text" 
+                            id="scan-input"
+                            placeholder="Link NFC-e ou Chave com 44 dígitos..." 
+                            class="flex-1 bg-white border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-1 focus:ring-emerald-500"
+                        />
+                        <button onclick="handleLinkProcess()" class="bg-emerald-600 text-white px-4 rounded-xl font-bold text-xs hover:bg-emerald-700 active:scale-95 transition-all">OK</button>
+                    </div>
+                </div>
+
+                <!-- VALIDAÇÃO DE PENDENTES EXTRAÍDOS COM REGEX -->
+                <div id="pending-section" class="hidden bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden shadow-sm animate-in fade-in duration-300">
+                    <div class="p-4 bg-amber-100/50 flex justify-between items-center border-b border-amber-200">
+                        <h3 class="text-xs font-black text-amber-800 uppercase flex items-center gap-1.5">
+                            <i data-lucide="file-check" class="w-4 h-4 text-amber-600"></i> Validando (<span id="pending-count">0</span>)
+                        </h3>
+                        <button onclick="confirmAllPending()" class="bg-amber-600 text-white px-3 py-1.5 rounded-xl text-[9px] font-bold uppercase hover:bg-amber-700 transition-colors">
+                            Salvar Todos
+                        </button>
+                    </div>
+                    <div id="pending-list" class="p-3 space-y-2"></div>
+                </div>
+
+                <!-- FORMULÁRIO MANUAL COM MÉTODO DE GASTO RECORRENTE -->
+                <form id="manual-form" class="bg-slate-50 rounded-2xl p-5 border border-slate-200/60 space-y-4" onsubmit="handleManualSubmit(event)">
+                    <h3 class="text-xs font-black text-slate-500 uppercase tracking-widest flex items-center gap-2 border-b border-slate-200/60 pb-2">
+                        <i data-lucide="pen-tool" class="w-4 h-4 text-emerald-600"></i> Lançamento Manual
+                    </h3>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="space-y-1">
+                            <label class="text-[9px] font-bold text-slate-400 uppercase">Usuário</label>
+                            <select id="select-user" name="user" class="w-full bg-white border border-slate-200 rounded-lg text-xs p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all"></select>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-[9px] font-bold text-slate-400 uppercase">Categoria</label>
+                            <select id="select-category" name="category" class="w-full bg-white border border-slate-200 rounded-lg text-xs p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all"></select>
+                        </div>
+                        <div class="space-y-1 col-span-2">
+                            <label class="text-[9px] font-bold text-slate-400 uppercase">Local/Estabelecimento</label>
+                            <input name="description" required type="text" placeholder="Ex: Feira livre" class="w-full bg-white border border-slate-200 rounded-lg text-xs p-2 outline-none focus:ring-1 focus:ring-emerald-500 transition-all" />
+                        </div>
+                        <div class="space-y-1 col-span-2">
+                            <label class="text-[9px] font-bold text-slate-400 uppercase">Valor R$</label>
+                            <input name="amount" required step="0.01" type="number" placeholder="0,00" class="w-full border border-emerald-200 bg-emerald-50/30 rounded-lg text-xs p-2 font-bold outline-none focus:ring-1 focus:ring-emerald-500 transition-all" />
+                        </div>
+                    </div>
+
+                    <!-- MÉTODO DE SELEÇÃO: SINALIZAR RECORRÊNCIA -->
+                    <div class="flex items-center justify-between p-3 bg-white border border-slate-200/60 rounded-xl">
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="repeat" class="w-4 h-4 text-emerald-600"></i>
+                            <span class="text-xs font-bold text-slate-700">Tornar gasto recorrente?</span>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="check-recurring" class="sr-only peer" onchange="toggleRecurringPeriod(this.checked)">
+                            <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+                        </label>
+                    </div>
+
+                    <!-- ABA/PAINEL COMPLEMENTAR DENTRO DO FORMULÁRIO DE SELEÇÃO DE PERÍODO -->
+                    <div id="recurring-period-panel" class="hidden animate-in slide-in-from-top-2 duration-200 p-4 bg-emerald-50/50 border border-emerald-100 rounded-xl space-y-3">
+                        <p class="text-[9px] font-black text-emerald-800 uppercase tracking-widest flex items-center gap-1.5">
+                            <i data-lucide="calendar" class="w-3.5 h-3.5"></i> Período e Frequência
+                        </p>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div class="space-y-1">
+                                <label class="text-[9px] font-bold text-slate-400 uppercase">Frequência</label>
+                                <select id="recurring-frequency" class="w-full bg-white border border-slate-200 rounded-lg text-xs p-2 outline-none focus:ring-1 focus:ring-emerald-500">
+                                    <option value="mensal">Mensal</option>
+                                    <option value="bimestral">Bimestral</option>
+                                    <option value="trimestral">Trimestral</option>
+                                    <option value="semestral">Semestral</option>
+                                    <option value="anual">Anual</option>
+                                </select>
+                            </div>
+                            <div class="space-y-1">
+                                <label class="text-[9px] font-bold text-slate-400 uppercase">Repetir por:</label>
+                                <div class="flex items-center gap-1.5">
+                                    <input type="number" id="recurring-months" min="2" max="120" value="12" class="w-full bg-white border border-slate-200 rounded-lg text-xs p-2 outline-none focus:ring-1 focus:ring-emerald-500 text-center font-bold" />
+                                    <span class="text-[10px] text-slate-500 font-bold uppercase">vezes</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-lg text-xs uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all">Salvar Lançamento</button>
+                </form>
+            </div>
+
+            <!-- ========================================== -->
+            <!-- ABA 2: EXTRATO (TRANSAÇÕES DO MÊS) -->
+            <!-- ========================================== -->
+            <div id="section-extrato" class="hidden space-y-4 animate-in fade-in duration-200">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xs font-black text-slate-400 uppercase tracking-widest">Extrato do Período</h2>
+                    <span id="registered-count" class="text-[9px] bg-slate-100 text-slate-600 px-2 py-1 rounded-full font-bold">0 itens</span>
+                </div>
+                
+                <div id="transactions-list" class="space-y-3">
+                    <!-- Gerado Dinamicamente -->
+                </div>
+            </div>
+
+            <!-- ========================================== -->
+            <!-- ABA 3: MENSAL (DASHBOARD POR USUÁRIO E CATEGORIA) -->
+            <!-- ========================================== -->
+            <div id="section-dashboard" class="hidden space-y-6 animate-in fade-in duration-200">
+                <div class="bg-gradient-to-br from-emerald-600 to-emerald-800 text-white p-5 rounded-3xl shadow-lg flex items-center justify-between">
+                    <div>
+                        <h3 class="text-[9px] font-black text-white/70 uppercase tracking-widest mb-1">Gasto Consolidado</h3>
+                        <div id="monthly-total-value" class="text-3xl font-black tracking-tight">R$ 0,00</div>
+                    </div>
+                    <div class="bg-white/10 p-3 rounded-2xl backdrop-blur-md">
+                        <i data-lucide="activity" class="w-6 h-6"></i>
+                    </div>
+                </div>
+
+                <div class="space-y-3">
+                    <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest">Membros da Família</h3>
+                    <div id="user-stats-list" class="grid grid-cols-2 gap-3"></div>
+                </div>
+
+                <div class="bg-slate-50 border border-slate-200/60 rounded-3xl p-5 space-y-4">
+                    <h3 class="font-black text-slate-700 text-xs uppercase tracking-widest flex items-center gap-2">
+                        <i data-lucide="pie-chart" class="text-emerald-500 w-4 h-4"></i> Categorias do Mês
+                    </h3>
+                    <div id="category-progress-list" class="space-y-4"></div>
+                </div>
+            </div>
+
+            <!-- ========================================== -->
+            <!-- ABA 4: ANUAL (VISÃO DE TENDÊNCIAS ANUAIS) -->
+            <!-- ========================================== -->
+            <div id="section-anual" class="hidden space-y-6 animate-in fade-in duration-200">
+                <div class="bg-slate-900 text-white p-5 rounded-3xl shadow-xl flex items-center justify-between">
+                    <div>
+                        <h3 id="annual-total-title" class="text-[10px] font-black text-emerald-400 uppercase tracking-[0.2em] mb-1">Total do Ano</h3>
+                        <div id="annual-total-value" class="text-2xl font-black tracking-tight">R$ 0,00</div>
+                    </div>
+                    <div class="bg-white/10 p-3.5 rounded-xl"><i data-lucide="calendar" class="w-5 h-5"></i></div>
+                </div>
+
+                <div class="space-y-3">
+                    <h3 class="text-xs font-black text-slate-400 uppercase tracking-widest">Membros da Família (Ano)</h3>
+                    <div id="user-annual-stats" class="grid grid-cols-2 gap-3"></div>
+                </div>
+
+                <div class="bg-slate-50 border border-slate-200/60 rounded-3xl p-5 space-y-6">
+                    <h3 class="font-black text-slate-700 text-xs uppercase tracking-widest flex items-center gap-2">
+                        <i data-lucide="bar-chart-3" class="text-emerald-500 w-4 h-4"></i> Evolução Mensal
+                    </h3>
+                    <div id="annual-bars-container" class="flex items-end justify-between h-40 gap-2 px-1"></div>
+                </div>
+            </div>
+
+            <!-- ========================================== -->
+            <!-- ABA 5: AJUSTES (PAINEL DE CONTROLE INTEGRADO) -->
+            <!-- ========================================== -->
+            <div id="section-ajustes" class="hidden space-y-6 animate-in fade-in duration-200">
+                
+                <!-- GERENCIAR USUÁRIOS -->
+                <section class="space-y-4 bg-slate-50 border border-slate-200/60 p-5 rounded-3xl">
+                    <h4 class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2 border-b border-slate-200 pb-2">
+                        <i data-lucide="users" class="w-4 h-4 text-emerald-600"></i> Gerenciar Usuários
+                    </h4>
+                    <div class="flex flex-col gap-2">
+                        <input 
+                            type="text" 
+                            id="new-user-input"
+                            placeholder="Nome do Usuário..." 
+                            class="w-full bg-white border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-1 focus:ring-emerald-500"
+                        />
+                        <div class="flex gap-2">
+                            <input 
+                                type="text" 
+                                id="new-user-card"
+                                placeholder="Cartões (ex: 1234, 5678)" 
+                                class="flex-1 bg-white border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-1 focus:ring-emerald-500"
+                            />
+                            <button 
+                                onclick="handleCreateUser()"
+                                class="bg-emerald-600 text-white px-4 rounded-xl font-bold text-xs uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all"
+                            >
+                                <i data-lucide="user-plus" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="users-config-list" class="grid grid-cols-1 gap-3 pt-2"></div>
+                </section>
+
+                <!-- GERENCIAR CATEGORIAS -->
+                <section class="space-y-4 bg-slate-50 border border-slate-200/60 p-5 rounded-3xl">
+                    <h4 class="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] flex items-center gap-2 border-b border-slate-200 pb-2">
+                        <i data-lucide="tag" class="w-4 h-4 text-emerald-600"></i> Gerenciar Categorias
+                    </h4>
+                    <div class="flex gap-2">
+                        <input 
+                            type="text" 
+                            id="new-category-input"
+                            placeholder="Nova Categoria..." 
+                            class="flex-1 bg-white border border-slate-200 rounded-xl text-xs p-3 outline-none focus:ring-1 focus:ring-emerald-500"
+                        />
+                        <button 
+                            onclick="handleCreateCategory()"
+                            class="bg-emerald-600 text-white px-5 rounded-xl font-bold text-xs uppercase shadow-md hover:bg-emerald-700 active:scale-95 transition-all"
+                        >
+                            ADD
+                        </button>
+                    </div>
+                    <div id="categories-config-list" class="flex flex-wrap gap-2 p-2 bg-white rounded-2xl border border-slate-100"></div>
+                </section>
+            </div>
+
+        </main>
+
+        <!-- BOTÕES DE NAVEGAÇÃO DE ABAS INFERIORES (NATIVE BOTTOM BAR) -->
+        <nav class="bg-white/95 border-t border-slate-100 fixed bottom-0 left-0 right-0 z-40 backdrop-blur-md max-w-[480px] mx-auto">
+            <div class="grid grid-cols-5 h-20 items-center justify-center text-center">
+                <button onclick="switchTab('lancamentos')" id="btn-tab-lancamentos" class="flex flex-col items-center justify-center gap-1 text-emerald-600">
+                    <i data-lucide="plus-circle" class="w-5 h-5"></i>
+                    <span class="text-[8px] font-black uppercase tracking-wider">Lançar</span>
+                </button>
+                <button onclick="switchTab('extrato')" id="btn-tab-extrato" class="flex flex-col items-center justify-center gap-1 text-slate-400">
+                    <i data-lucide="file-text" class="w-5 h-5"></i>
+                    <span class="text-[8px] font-black uppercase tracking-wider">Extrato</span>
+                </button>
+                <button onclick="switchTab('dashboard')" id="btn-tab-dashboard" class="flex flex-col items-center justify-center gap-1 text-slate-400">
+                    <i data-lucide="pie-chart" class="w-5 h-5"></i>
+                    <span class="text-[8px] font-black uppercase tracking-wider">Mensal</span>
+                </button>
+                <button onclick="switchTab('anual')" id="btn-tab-anual" class="flex flex-col items-center justify-center gap-1 text-slate-400">
+                    <i data-lucide="bar-chart" class="w-5 h-5"></i>
+                    <span class="text-[8px] font-black uppercase tracking-wider">Anual</span>
+                </button>
+                <button onclick="switchTab('ajustes')" id="btn-tab-ajustes" class="flex flex-col items-center justify-center gap-1 text-slate-400">
+                    <i data-lucide="settings" class="w-5 h-5"></i>
+                    <span class="text-[8px] font-black uppercase tracking-wider">Ajustes</span>
+                </button>
+            </div>
+        </nav>
+
+    </div>
+
+    <!-- OVERLAY DO SCANNER AO VIVO -->
+    <div id="scanner-modal" class="fixed inset-0 z-50 bg-black hidden flex-col items-center justify-center max-w-[480px] mx-auto">
+        <div class="relative w-full aspect-[3/4] bg-slate-900 overflow-hidden">
+            <video id="scanner-video" autoplay playsinline class="w-full h-full object-cover"></video>
+            <div class="absolute inset-0 border-2 border-emerald-500/30 m-12 pointer-events-none">
+                <div class="absolute top-0 left-0 w-full h-1 bg-emerald-500/50 animate-scan-line shadow-[0_0_15px_rgba(16,185,129,0.5)]"></div>
+            </div>
+            <div class="absolute bottom-10 left-0 right-0 flex justify-around items-center px-10">
+                <button onclick="stopScanner()" class="p-4 bg-white/10 rounded-full text-white backdrop-blur-md hover:bg-white/20 transition-colors">
+                    <i data-lucide="x" class="w-6 h-6"></i>
+                </button>
+                <button onclick="capturePhoto()" class="w-20 h-20 bg-white rounded-full border-4 border-emerald-500 flex items-center justify-center shadow-2xl active:scale-90 transition-all">
+                    <div class="w-16 h-16 rounded-full border-2 border-slate-200 bg-white"></div>
+                </button>
+                <div class="w-14"></div>
+            </div>
+        </div>
+        <canvas id="scanner-canvas" class="hidden"></canvas>
+        <p class="text-white/60 text-[10px] font-black uppercase tracking-[0.3em] mt-8 animate-pulse">Aponte para o Cupom ou QR Code</p>
+    </div>
+
+    <!-- FEEDBACK TOAST (INTEGRADO À BASE DO DISPOSITIVO) -->
+    <div id="toast" class="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] hidden bg-slate-900 text-white text-[10px] font-black px-6 py-3 rounded-full items-center gap-3 uppercase border border-white/10 shadow-2xl animate-in slide-in-from-bottom-5 max-w-[360px] w-auto">
+        <div id="toast-loader" class="hidden"><i data-lucide="loader-2" class="animate-spin text-emerald-400 w-4 h-4"></i></div>
+        <div id="toast-success" class="hidden"><i data-lucide="check-circle" class="text-emerald-400 w-4 h-4"></i></div>
+        <span id="toast-message">Feedback</span>
+    </div>
+
+    <!-- CODE SCRIPT -->
+    <script>
+        // --- ESTADOS DO SISTEMA ---
+        let activeTab = 'lancamentos';
+        let currentMonth = new Date().getMonth();
+        let currentYear = new Date().getFullYear();
+        let isScanning = false;
+        let stream = null;
+
+        // Dados Locais e Fallbacks
+        let expenses = JSON.parse(localStorage.getItem('expenses_v12')) || [];
+        let users = JSON.parse(localStorage.getItem('users_v12')) || [
+            { id: '2', name: 'Usuário Padrão', cards: ['1234'] }
+        ];
+        let categories = JSON.parse(localStorage.getItem('categories_v12')) || [
+            'Aluguel', 'Beleza', 'Casa', 'Combustível', 'Energia', 'Estacionamento', 
+            'Manutenção Carro', 'Feira', 'Fast Food', 'Delivery', 'Gás', 
+            'Mercado', 'Farmácia', 'Internet', 'Celular', 'Padaria', 'Pets'
+        ];
+        let pendingExpenses = [];
+
+        const monthNames = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+
+        // Mapeamento de meses abreviados para numérico (Português)
+        const monthsMap = {
+            jan: '01', fev: '02', mar: '03', abr: '04', mai: '05', may: '05',
+            jun: '06', jul: '07', ago: '08', set: '09', out: '10', nov: '11', dez: '12'
+        };
+
+        // --- SISTEMA TOAST ---
+        let toastTimeout = null;
+        function showToast(message, loading = false) {
+            const toast = document.getElementById('toast');
+            const msgSpan = document.getElementById('toast-message');
+            const loader = document.getElementById('toast-loader');
+            const success = document.getElementById('toast-success');
+
+            clearTimeout(toastTimeout);
+            toast.classList.remove('hidden');
+            toast.classList.add('flex');
+            msgSpan.innerText = message;
+
+            if (loading) {
+                loader.classList.remove('hidden');
+                success.classList.add('hidden');
+            } else {
+                loader.classList.add('hidden');
+                success.classList.remove('hidden');
+                toastTimeout = setTimeout(hideToast, 3500);
+            }
+            lucide.createIcons();
+        }
+
+        function hideToast() {
+            const toast = document.getElementById('toast');
+            toast.classList.add('hidden');
+            toast.classList.remove('flex');
+        }
+
+        // --- HAPTIC FEEDBACK SINTETIZADO COM AUDIO API ---
+        function playSuccessSound() {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                const ctx = new AudioCtx();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+                osc.frequency.setValueAtTime(880.00, ctx.currentTime + 0.1); // A5
+                
+                gain.gain.setValueAtTime(0.1, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.35);
+                
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.35);
+            } catch (e) {
+                console.log("AudioContext blocked or unsupporterd");
+            }
+        }
+
+        // --- INICIALIZAÇÃO ---
+        window.addEventListener('DOMContentLoaded', () => {
+            loadLibraryJsQR();
+            updateUI();
+        });
+
+        // Carregamento dinâmico da biblioteca jsQR
+        function loadLibraryJsQR() {
+            const script = document.createElement('script');
+            script.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js";
+            script.async = true;
+            document.body.appendChild(script);
+        }
+
+        // --- FUNÇÕES DE PERSISTÊNCIA ---
+        function saveLocal() {
+            localStorage.setItem('expenses_v12', JSON.stringify(expenses));
+            localStorage.setItem('users_v12', JSON.stringify(users));
+            localStorage.setItem('categories_v12', JSON.stringify(categories));
+        }
+
+        // --- GESTÃO DE MENUS E NAVEGAÇÃO ---
+        function switchTab(tab) {
+            activeTab = tab;
+            
+            // Alteração de classes dos botões das abas inferiores
+            ['lancamentos', 'extrato', 'dashboard', 'anual', 'ajustes'].forEach(t => {
+                const btn = document.getElementById(`btn-tab-${t}`);
+                if (t === tab) {
+                    btn.className = "flex flex-col items-center justify-center gap-1 text-emerald-600 tab-active";
+                } else {
+                    btn.className = "flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-slate-600";
+                }
+            });
+
+            // Alteração de visibilidade das seções principais
+            document.getElementById('section-lancamentos').classList.toggle('hidden', tab !== 'lancamentos');
+            document.getElementById('section-extrato').classList.toggle('hidden', tab !== 'extrato');
+            document.getElementById('section-dashboard').classList.toggle('hidden', tab !== 'dashboard');
+            document.getElementById('section-anual').classList.toggle('hidden', tab !== 'anual');
+            document.getElementById('section-ajustes').classList.toggle('hidden', tab !== 'ajustes');
+
+            updateUI();
+        }
+
+        function changePeriod(delta) {
+            if (activeTab === 'anual') {
+                currentYear += delta;
+            } else {
+                currentMonth += delta;
+                if (currentMonth < 0) {
+                    currentMonth = 11;
+                    currentYear--;
+                } else if (currentMonth > 11) {
+                    currentMonth = 0;
+                    currentYear++;
+                }
+            }
+            updateUI();
+        }
+
+        function updateUI() {
+            // Atualizar cabeçalho dinâmico do smartphone
+            const titleEl = document.getElementById('display-date-title');
+            if (activeTab === 'anual') {
+                titleEl.innerText = `Visão Anual ${currentYear}`;
+            } else {
+                titleEl.innerText = `${monthNames[currentMonth]}, ${currentYear}`;
+            }
+
+            // Renderizar opções nos formulários manuais
+            const uSelect = document.getElementById('select-user');
+            const cSelect = document.getElementById('select-category');
+            uSelect.innerHTML = users.map(u => `<option value="${u.name}">${u.name}</option>`).join('');
+            cSelect.innerHTML = categories.map(c => `<option value="${c}">${c}</option>`).join('');
+
+            // Renderizar o conteúdo correspondente
+            if (activeTab === 'lancamentos') {
+                renderPending();
+            } else if (activeTab === 'extrato') {
+                renderExpensesList();
+            } else if (activeTab === 'dashboard') {
+                renderDashboard();
+            } else if (activeTab === 'anual') {
+                renderAnnual();
+            } else if (activeTab === 'ajustes') {
+                renderConfigLists();
+            }
+            lucide.createIcons();
+        }
+
+        // --- MOTOR DE EXTRAÇÃO EXCLUSIVO VIA REGEX (MODO REGEX CALIBRADO) ---
+        function regexMappingParser(rawText) {
+            if (!rawText) return null;
+            const textLower = rawText.toLowerCase();
+            const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+            let estabelecimento = "Estabelecimento Desconhecido";
+            let valor = 0.00;
+            let usuario = users[0]?.name || "Usuário";
+            let categoria = "Mercado"; 
+            let dataCompra = new Date().toISOString().split('T')[0]; // Padrão: Hoje
+            let cartaoDetectado = "";
+
+            // --- 1. REGEX DE CARTÃO (Anexo 3: asteriscos seguidos por 4 dígitos) ---
+            const asteriskCardRegex = /(?:\*{2,}|X{2,})\s*(\d{4})\b/i;
+            const asteriskMatches = rawText.match(asteriskCardRegex);
+
+            if (asteriskMatches && asteriskMatches[1]) {
+                cartaoDetectado = asteriskMatches[1];
+            } else {
+                const fallbackCardRegex = /(?:cartao|cartão|final|via|credito|debito|mastercard|visa)\D{0,10}(\d{4})\b/i;
+                const fallbackMatches = rawText.match(fallbackCardRegex);
+                if (fallbackMatches && fallbackMatches[1]) {
+                    cartaoDetectado = fallbackMatches[1];
+                }
+            }
+
+            // Atribuição automática do usuário com base no cartão mapeado (Suporta múltiplos cartões por usuário)
+            if (cartaoDetectado) {
+                for (const u of users) {
+                    if (u.cards && u.cards.some(c => c.trim().includes(cartaoDetectado) || cartaoDetectado.includes(c.trim()))) {
+                        usuario = u.name;
+                        break;
+                    }
+                }
+            }
+
+            // --- 2. REGEX DE DATA (Anexo 4: Data com suporte a meses em português ex: 10/MAI/2026) ---
+            const ptMonthDateRegex = /\b(\d{1,2})[\/\.-](jan|fev|mar|abr|mai|may|jun|jul|ago|set|out|nov|dez)[^\d\s]*[\/\.-](\d{2,4})\b/i;
+            const ptMonthMatch = rawText.match(ptMonthDateRegex);
+
+            if (ptMonthMatch) {
+                let d = parseInt(ptMonthMatch[1]);
+                let mStr = ptMonthMatch[2].toLowerCase();
+                let y = ptMonthMatch[3];
+                let m = monthsMap[mStr];
+
+                if (d >= 1 && d <= 31 && m) {
+                    if (y.length === 2) {
+                        y = "20" + y;
+                    }
+                    const yearInt = parseInt(y);
+                    if (yearInt >= 2000 && yearInt <= 2040) {
+                        dataCompra = `${y}-${m}-${String(d).padStart(2, '0')}`;
+                    }
+                }
+            } else {
+                const dateRegex = /\b(\d{2})[\/\.-](\d{2})[\/\.-](\d{2,4})\b/;
+                const dateMatch = rawText.match(dateRegex);
+                if (dateMatch) {
+                    let d = parseInt(dateMatch[1]);
+                    let m = parseInt(dateMatch[2]);
+                    let y = dateMatch[3];
+
+                    if (d >= 1 && d <= 31 && m >= 1 && m <= 12) {
+                        if (y.length === 2) {
+                            y = "20" + y;
+                        }
+                        const yearInt = parseInt(y);
+                        if (yearInt >= 2000 && yearInt <= 2040) {
+                            dataCompra = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                        }
+                    }
+                }
+            }
+
+            // --- 3. REGEX DO ESTABELECIMENTO / LOCAL (Anexo 2: prioriza o nome legível na nota) ---
+            const blacklistRegex = /(cnpj|ie|im|telefone|tel|rua|av\.|avenida|bairro|cep|fone|data|hora|cupom|fiscal|extrato|comprovante|venda|original|via|coo|ccf|val|pago|danfe|documento|auxiliar|nfc|site|sefaz|www\.|emiss|operador|caixa|terminal|autentic|filiacao|adquirente|transacao|credito|debito|tef|pos|mastercard|visa|elo|hipercard|label|aid|nsu|snpos|arqc)/i;
+            const phoneCnpjRegex = /(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2}|\d{2}\.\d{4,5}-\d{4})/g;
+
+            let candidateName = "";
+
+            for (const line of lines) {
+                const cleanLine = line.trim();
+                if (cleanLine.length > 3 && 
+                    /^[A-Z\s\.\-\&\(\)\/]+$/.test(cleanLine) && 
+                    cleanLine.split(/\s+/).length >= 2 &&
+                    !blacklistRegex.test(cleanLine) && 
+                    !phoneCnpjRegex.test(cleanLine) &&
+                    !/\d{2}\/\d{2}\/\d{4}/.test(cleanLine)) {
+                    
+                    candidateName = cleanLine;
+                    break;
+                }
+            }
+
+            if (!candidateName) {
+                for (let i = 0; i < Math.min(lines.length, 12); i++) {
+                    const currentLine = lines[i].trim();
+                    if (currentLine.length > 2 && 
+                        !/^\d+$/.test(currentLine) && 
+                        !blacklistRegex.test(currentLine) && 
+                        !phoneCnpjRegex.test(currentLine) &&
+                        !/\d{2}\/\d{2}\/\d{4}/.test(currentLine)) {
+                        
+                        candidateName = currentLine;
+                        break;
+                    }
+                }
+            }
+
+            if (candidateName) {
+                candidateName = candidateName.replace(/[^\w\s\-\.\,\&\(\)\/\']/gi, '').trim();
+                estabelecimento = candidateName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+            }
+
+            // --- 4. REGEX DE VALOR (Anexo 1: prioridade absoluta pós "R$") ---
+            const rsRegex = /R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+[\.,]\d{2})/gi;
+            let rsValues = [];
+            let rsMatch;
+            while ((rsMatch = rsRegex.exec(rawText)) !== null) {
+                const val = parseNumber(rsMatch[1]);
+                if (val > 0 && val < 9999) {
+                    rsValues.push(val);
+                }
+            }
+
+            if (rsValues.length > 0) {
+                valor = rsValues[0]; 
+            } else {
+                const priceRegex = /(?:r\$|rs\$|\$)?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+[\.,]\d{2})/gi;
+                const totalKeywords = /(total|pago|pagar|subtotal|import|valor|liquido|debito|credito|vlr tot|vlr)/i;
+                let potentialValues = [];
+
+                for (const line of lines) {
+                    if (totalKeywords.test(line)) {
+                        if (line.replace(/[^\d]/g, '').length > 20) continue; 
+                        
+                        const matchedPrices = line.match(priceRegex);
+                        if (matchedPrices) {
+                            matchedPrices.forEach(str => {
+                                const val = parseNumber(str);
+                                if (val > 0 && val < 9999) {
+                                    potentialValues.unshift(val);
+                                }
+                            });
+                        }
+                    }
+                }
+
+                if (potentialValues.length === 0) {
+                    const allPrices = rawText.match(priceRegex);
+                    if (allPrices) {
+                        allPrices.forEach(str => {
+                            const val = parseNumber(str);
+                            if (val > 0 && val < 5000) {
+                                potentialValues.push(val);
+                            }
+                        });
+                    }
+                }
+
+                if (potentialValues.length > 0) {
+                    valor = Math.max(...potentialValues);
+                }
+            }
+
+            // --- 5. CATEGORIZAÇÃO POR DICIONÁRIOS INTELIGENTES ---
+            const categoryLexicon = {
+                'Aluguel': ['aluguel', 'locacao', 'condominio', 'imobiliaria', 'locatario'],
+                'Beleza': ['salao', 'cabeleireiro', 'barba', 'barbearia', 'estetica', 'esmalte', 'manicure', 'cosmeticos', 'boticario', 'natura', 'maquiagem', 'perfumaria'],
+                'Casa': ['tok st延长k', 'leroy', 'decoracao', 'moveis', 'construcao', 'utensilios', 'multicoisas', 'casa', 'enxoval', 'cama', 'mesa', 'banho', 'ferragem'],
+                'Combustível': ['posto', 'combustivel', 'gasolina', 'etanol', 'diesel', 'petrobras', 'ipiranga', 'shell', 'ale', 'lubrificante', 'br', 'auto posto', 'convenie'],
+                'Energia': ['copel', 'enel', 'cemig', 'elektro', 'coelba', 'luz', 'energia eletrica', 'celpe', 'neoenergia'],
+                'Estacionamento': ['estacionamento', 'rotativo', 'zona azul', 'pare', 'park', 'parking', 'garagem', 'estacione'],
+                'Manutenção Carro': ['oficina', 'mecanico', 'pecas', 'pneu', 'auto', 'autocenters', 'troca de oleo', 'freio', 'alinhamento', 'amortecedor'],
+                'Feira': ['feira', 'fruta', 'verdura', 'legume', 'hortifruti', 'pomar', 'sacolao', 'hortalica'],
+                'Fast Food': ['mcdonalds', 'mc donalds', 'burger king', 'bk', 'subway', 'habibs', 'bobs', 'giraffas', 'kfc', 'milkshake'],
+                'Delivery': ['ifood', 'rappi', 'ubereats', 'delivery', 'entrega', 'pedido online'],
+                'Gás': ['gas de cozinha', 'gas', 'liquigas', 'ultragaz', 'copagaz', 'glp', 'entregas de gas'],
+                'Mercado': ['mercado', 'supermercado', 'hipermercado', 'atacado', 'carrefour', 'pao de acucar', 'extra', 'muffato', 'assai', 'atacadao', 'condor', 'compras', 'alimento', 'emporio', 'mercearia', 'super'],
+                'Farmácia': ['drogaria', 'farmacia', 'remedio', 'medicamento', 'pague menos', 'raia', 'drogasil', 'sao joao', 'ultrapopular', 'panvel', 'pilula', 'comprimido'],
+                'Internet': ['internet', 'fibra', 'net', 'claro residencial', 'copel telecom', 'oi fibra', 'brisanet'],
+                'Celular': ['vivo', 'tim', 'claro', 'oi', 'recarga', 'celular', 'chip', 'pre-pago', 'movel'],
+                'Padaria': ['padaria', 'panificadora', 'pao', 'panificacao', 'confeitaria', 'bolo', 'pao de queijo', 'broa', 'biscoito'],
+                'Pets': ['pet', 'petshop', 'veterinaria', 'racao', 'cachorro', 'gato', 'banho e tosa', 'agropecuaria', 'animal', 'veterinario']
+            };
+
+            let bestCategory = categories[0] || 'Mercado';
+            let maxScore = -1;
+
+            for (const cat of categories) {
+                const lexicon = categoryLexicon[cat] || [cat.toLowerCase()];
+                let score = 0;
+                lexicon.forEach(term => {
+                    const pattern = new RegExp('\\b' + term + '\\b', 'gi');
+                    const matches = textLower.match(pattern);
+                    if (matches) {
+                        score += matches.length * 2.0; 
+                    }
+                    if (textLower.includes(term)) {
+                        score += 0.5; 
+                    }
+                });
+
+                if (score > maxScore) {
+                    maxScore = score;
+                    bestCategory = cat;
+                }
+            }
+
+            if (maxScore > 0) {
+                categoria = bestCategory;
+            }
+
+            return {
+                estabelecimento: estabelecimento,
+                valor: parseFloat(valor.toFixed(2)),
+                usuario: usuario,
+                categoria: categoria,
+                data: dataCompra,
+                cartao: cartaoDetectado
+            };
+        }
+
+        // Auxiliar: Normalização e limpeza de string numérica
+        function parseNumber(str) {
+            let cleaned = str.replace(/[^\d,\.]/g, '');
+            if (cleaned.includes(',') && cleaned.includes('.')) {
+                cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+            } else if (cleaned.includes(',')) {
+                cleaned = cleaned.replace(',', '.');
+            }
+            return parseFloat(cleaned) || 0;
+        }
+
+        // --- SISTEMA DE SELEÇÃO: SINALIZAR SE O GASTO SERÁ RECORRENTE ---
+        function toggleRecurringPeriod(checked) {
+            const panel = document.getElementById('recurring-period-panel');
+            if (checked) {
+                panel.classList.remove('hidden');
+                panel.classList.add('block');
+            } else {
+                panel.classList.remove('block');
+                panel.classList.add('hidden');
+            }
+        }
+
+        // --- PROCESSAMENTO DE PENDENCIAS ---
+        function addPendingItem(data) {
+            if (!data) return;
+            const newItem = {
+                id: Date.now() + Math.random(),
+                user: data.usuario || users[0].name,
+                description: data.estabelecimento || "Nova Compra",
+                category: categories.includes(data.categoria) ? data.categoria : categories[0],
+                amount: data.valor || 0,
+                date: data.data || new Date().toISOString().split('T')[0],
+                cartao: data.cartao || ""
+            };
+            pendingExpenses.unshift(newItem);
+            renderPending();
+            showToast("Mapeamento Regex concluído!");
+        }
+
+        function renderPending() {
+            const container = document.getElementById('pending-section');
+            const list = document.getElementById('pending-list');
+            const count = document.getElementById('pending-count');
+
+            if (pendingExpenses.length === 0) {
+                container.classList.add('hidden');
+                return;
+            }
+
+            container.classList.remove('hidden');
+            count.innerText = pendingExpenses.length;
+
+            list.innerHTML = pendingExpenses.map(p => `
+                <div class="bg-white p-3 border border-amber-200 rounded-2xl space-y-2.5">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="space-y-0.5">
+                            <span class="text-[8px] text-slate-400 font-extrabold uppercase tracking-wide">Membro</span>
+                            <select 
+                                class="w-full text-xs font-bold bg-slate-50 border border-slate-100 p-1.5 rounded-lg outline-none"
+                                onchange="updatePendingField('${p.id}', 'user', this.value)"
+                            >
+                                ${users.map(u => `<option value="${u.name}" ${p.user === u.name ? 'selected' : ''}>${u.name}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="space-y-0.5">
+                            <span class="text-[8px] text-slate-400 font-extrabold uppercase tracking-wide">Categoria</span>
+                            <select 
+                                class="w-full text-xs font-bold bg-slate-50 border border-slate-100 p-1.5 rounded-lg outline-none"
+                                onchange="updatePendingField('${p.id}', 'category', this.value)"
+                            >
+                                ${categories.map(c => `<option value="${c}" ${p.category === c ? 'selected' : ''}>${c}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="space-y-0.5">
+                        <span class="text-[8px] text-slate-400 font-extrabold uppercase tracking-wide">Local/Loja</span>
+                        <input 
+                            type="text" 
+                            class="w-full text-xs font-bold bg-slate-50 border border-slate-100 p-1.5 rounded-lg outline-none" 
+                            value="${p.description}" 
+                            onchange="updatePendingField('${p.id}', 'description', this.value)"
+                        />
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2 items-center">
+                        <div class="space-y-0.5">
+                            <span class="text-[8px] text-slate-400 font-extrabold uppercase tracking-wide">Valor R$</span>
+                            <input 
+                                type="number" 
+                                step="0.01" 
+                                class="w-full text-xs font-black text-amber-800 bg-amber-50/50 border border-amber-100 p-1.5 rounded-lg outline-none" 
+                                value="${p.amount}" 
+                                onchange="updatePendingField('${p.id}', 'amount', this.value)"
+                            />
+                        </div>
+                        <div class="flex flex-col gap-1 text-center justify-center">
+                            <span class="text-[8px] text-slate-500 font-bold">
+                                ${p.cartao ? `💳 Final: ${p.cartao}` : 'Sem cartão'}
+                            </span>
+                            <div class="flex gap-2 justify-center">
+                                <button onclick="approvePending('${p.id}')" class="bg-emerald-600 text-white p-2 rounded-xl text-xs hover:bg-emerald-700 active:scale-95 transition-all flex items-center justify-center flex-1"><i data-lucide="check" class="w-4 h-4"></i></button>
+                                <button onclick="discardPending('${p.id}')" class="bg-red-50 text-red-500 p-2 rounded-xl text-xs hover:bg-red-100 active:scale-95 transition-all flex items-center justify-center"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        function updatePendingField(id, field, value) {
+            const item = pendingExpenses.find(p => p.id == id);
+            if (item) {
+                if (field === 'amount') {
+                    item[field] = parseFloat(value) || 0;
+                } else {
+                    item[field] = value;
+                }
+            }
+        }
+
+        function approvePending(id) {
+            const index = pendingExpenses.findIndex(p => p.id == id);
+            if (index !== -1) {
+                const item = pendingExpenses[index];
+                expenses.push(item);
+                pendingExpenses.splice(index, 1);
+                saveLocal();
+                updateUI();
+                playSuccessSound();
+                showToast("Lançamento confirmado!");
+            }
+        }
+
+        // --- SUBMISSÃO MANUAL COM MÉTODO DE RECORRÊNCIA INTEGRADO ---
+        function handleManualSubmit(e) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const user = formData.get('user');
+            const category = formData.get('category');
+            const description = formData.get('description');
+            const amount = parseFloat(formData.get('amount')) || 0;
+            const isRecurring = document.getElementById('check-recurring').checked;
+
+            if (isRecurring) {
+                const recurrenceMonths = parseInt(document.getElementById('recurring-months').value) || 12;
+                const frequency = document.getElementById('recurring-frequency').value || 'mensal';
+                
+                let intervalMonths = 1;
+                if (frequency === 'bimestral') intervalMonths = 2;
+                else if (frequency === 'trimestral') intervalMonths = 3;
+                else if (frequency === 'semestral') intervalMonths = 6;
+                else if (frequency === 'anual') intervalMonths = 12;
+
+                // Geração das parcelas com datas incrementadas nos meses futuros correspondentes
+                for (let i = 0; i < recurrenceMonths; i++) {
+                    const totalMonthOffset = i * intervalMonths;
+                    let targetMonth = currentMonth + totalMonthOffset;
+                    let targetYear = currentYear + Math.floor(targetMonth / 12);
+                    targetMonth = targetMonth % 12;
+
+                    const newExpense = {
+                        id: Date.now() + Math.random(), // ID exclusivo para cada período
+                        user: user,
+                        category: category,
+                        description: `${description} (${i + 1}/${recurrenceMonths})`,
+                        amount: amount,
+                        date: `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}-15`
+                    };
+                    expenses.push(newExpense);
+                }
+                showToast(`Recorrência criada para ${recurrenceMonths} períodos!`);
+            } else {
+                const newExpense = {
+                    id: Date.now(),
+                    user: user,
+                    category: category,
+                    description: description,
+                    amount: amount,
+                    date: `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-15`
+                };
+                expenses.push(newExpense);
+                showToast("Lançamento efetuado!");
+            }
+
+            saveLocal();
+            updateUI();
+            e.target.reset();
+            
+            // Ocultar aba de recorrência e desmarcar switch
+            document.getElementById('check-recurring').checked = false;
+            toggleRecurringPeriod(false);
+            
+            playSuccessSound();
+        }
+
+        function deleteExpense(id) {
+            expenses = expenses.filter(exp => exp.id != id);
+            saveLocal();
+            updateUI();
+            showToast("Item removido");
+        }
+
+        // --- RENDERIZAÇÃO DA LISTA DE EXTRATO (TRANSAÇÕES) ---
+        function renderExpensesList() {
+            const container = document.getElementById('transactions-list');
+            const count = document.getElementById('registered-count');
+
+            const currentPeriodExpenses = expenses.filter(exp => {
+                const date = new Date(exp.date + 'T00:00:00');
+                return date.getMonth() === currentMonth && date.getFullYear() === currentYear;
+            });
+
+            count.innerText = `${currentPeriodExpenses.length} transações`;
+
+            if (currentPeriodExpenses.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center py-12 text-slate-400 space-y-2">
+                        <i data-lucide="archive" class="w-8 h-8 mx-auto opacity-50"></i>
+                        <p class="text-xs">Nenhum gasto registrado neste mês.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = currentPeriodExpenses.map(exp => {
+                const formattedDate = new Date(exp.date + 'T00:00:00').toLocaleDateString('pt-BR', {day: '2-digit', month: '2-digit'});
+                const initials = exp.user.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+                
+                return `
+                    <div class="bg-slate-50 p-4 border border-slate-100 rounded-3xl flex justify-between items-center hover:bg-slate-100/50 transition-colors">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-emerald-100 text-emerald-800 text-[10px] font-black h-9 w-9 rounded-2xl flex items-center justify-center shadow-inner tracking-wider">
+                                ${initials}
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-black text-slate-800 max-w-[180px] truncate">${exp.description}</h4>
+                                <div class="flex items-center gap-1.5 mt-0.5">
+                                    <span class="text-[8px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider">${exp.category}</span>
+                                    <span class="text-[8px] text-slate-400 font-bold">${formattedDate}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs font-extrabold text-slate-900 whitespace-nowrap">R$ ${exp.amount.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                            <button onclick="deleteExpense('${exp.id}')" class="text-slate-300 hover:text-red-500 p-1 transition-colors">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Tesseract local OCR integrado para uploads de imagens
+        async function handleFileUpload(event) {
+            const files = event.target.files;
+            if (files.length === 0) return;
+
+            showToast("Processando nota...", true);
+
+            for (let i = 0; i < Math.min(files.length, 5); i++) {
+                const file = files[i];
+                try {
+                    const text = await performLocalOCR(file);
+                    const parsedData = regexMappingParser(text);
+                    addPendingItem(parsedData);
+                } catch (err) {
+                    console.error(err);
+                    showToast("Falha ao ler imagem");
+                }
+            }
+            hideToast();
+        }
+
+        function performLocalOCR(fileOrUrl) {
+            return new Promise((resolve, reject) => {
+                Tesseract.recognize(
+                    fileOrUrl,
+                    'por', // Idioma Português brasileiro
+                    { logger: m => console.log(m.status + ": " + Math.round(m.progress * 100) + "%") }
+                ).then(({ data: { text } }) => {
+                    resolve(text);
+                }).catch(err => reject(err));
+            });
+        }
+
+        // --- ENTRADA DE NOTA VIA LINK / CHAVE NFC-E ---
+        async function handleLinkProcess() {
+            const input = document.getElementById('scan-input');
+            const val = input.value.trim();
+            if (!val) return;
+
+            showToast("Mapeando link da nota...", true);
+
+            setTimeout(() => {
+                let key = "";
+                let value = 0.00;
+                let dateStr = new Date().toISOString().split('T')[0];
+                let invoiceNumber = "";
+                let cnpj = "";
+
+                // Procura por chave de acesso de 44 dígitos
+                const keyRegex = /\b\d{44}\b/;
+                let keyMatch = val.match(keyRegex);
+
+                // Formato padrão de URL de QR Code NFC-e (ex: ...?p=CHAVE|...)
+                if (!keyMatch && val.includes("p=")) {
+                    try {
+                        const urlObj = new URL(val);
+                        const pParam = urlObj.searchParams.get("p");
+                        if (pParam) {
+                            const parts = pParam.split('|');
+                            if (parts[0] && parts[0].length === 44) {
+                                key = parts[0];
+                                if (parts.length >= 5) {
+                                    const possibleVal = parseFloat(parts[4]);
+                                    if (!isNaN(possibleVal) && possibleVal > 0) {
+                                        value = possibleVal;
+                                    }
+                                }
+                                if (parts.length >= 4 && parts[3].length === 2) {
+                                    const day = parts[3];
+                                    const year = "20" + key.substring(2, 4);
+                                    const month = key.substring(4, 6);
+                                    dateStr = `${year}-${month}-${day}`;
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                }
+
+                if (keyMatch) {
+                    key = keyMatch[0];
+                } else if (!key && val.length === 44 && /^\d+$/.test(val)) {
+                    key = val;
+                }
+
+                if (val.includes("http")) {
+                    try {
+                        const urlObj = new URL(val);
+                        const valueParams = ["vTo", "vVal", "vTotal", "vNF", "valor", "total", "vProd"];
+                        for (let param of valueParams) {
+                            const pVal = urlObj.searchParams.get(param);
+                            if (pVal) {
+                                const parsed = parseFloat(pVal.replace(',', '.'));
+                                if (!isNaN(parsed) && parsed > 0) {
+                                    value = parsed;
+                                    break;
+                                }
+                            }
+                        }
+
+                        const dhEmi = urlObj.searchParams.get("dhEmi");
+                        if (dhEmi) {
+                            let decodedDate = dhEmi;
+                            if (/^[0-9a-fA-F]+$/.test(dhEmi) && dhEmi.length > 10) {
+                                try {
+                                    let temp = "";
+                                    for (let i = 0; i < dhEmi.length; i += 2) {
+                                        temp += String.fromCharCode(parseInt(dhEmi.substr(i, 2), 16));
+                                    }
+                                    decodedDate = temp;
+                                } catch(err) {}
+                            }
+                            const dateMatch = decodedDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+                            if (dateMatch) {
+                                dateStr = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`;
+                            }
+                        }
+
+                        const keyParams = ["chNFe", "chave", "ch", "id"];
+                        for (let param of keyParams) {
+                            const pk = urlObj.searchParams.get(param);
+                            if (pk && pk.length === 44 && /^\d+$/.test(pk)) {
+                                key = pk;
+                                break;
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                if (key && key.length === 44) {
+                    const yy = key.substring(2, 4);
+                    const mm = key.substring(4, 6);
+                    const year = "20" + yy;
+                    const rawCnpj = key.substring(6, 20);
+                    cnpj = rawCnpj.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
+                    const rawNumber = key.substring(25, 34);
+                    invoiceNumber = parseInt(rawNumber, 10).toString();
+
+                    if (dateStr) {
+                        const dateParts = dateStr.split('-');
+                        if (dateParts[0] !== year || dateParts[1] !== mm) {
+                            const day = dateParts[2] || "15";
+                            dateStr = `${year}-${mm}-${day}`;
+                        }
+                    } else {
+                        dateStr = `${year}-${mm}-15`;
+                    }
+                }
+
+                let estabelecimento = "NFC-e Sefaz";
+                if (invoiceNumber && cnpj) {
+                    estabelecimento = `NFC-e Nº ${invoiceNumber} (${cnpj})`;
+                } else if (cnpj) {
+                    estabelecimento = `NFC-e (${cnpj})`;
+                } else if (key) {
+                    estabelecimento = `NFC-e Chave: ...${key.substring(36)}`;
+                }
+
+                const parsedData = {
+                    estabelecimento: estabelecimento,
+                    valor: parseFloat(value.toFixed(2)),
+                    usuario: users[0]?.name || "Usuário Padrão",
+                    categoria: "Mercado",
+                    data: dateStr,
+                    cartao: ""
+                };
+
+                addPendingItem(parsedData);
+                input.value = "";
+                hideToast();
+                toggleElement('link-input-container', false);
+            }, 1000);
+        }
+
+        // --- GERENCIAMENTO DE SCANNER / CÂMERA AO VIVO ---
+        async function startScanner() {
+            const modal = document.getElementById('scanner-modal');
+            const video = document.getElementById('scanner-video');
+
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            isScanning = true;
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                video.srcObject = stream;
+                tickQRScan();
+            } catch (err) {
+                console.error("Sem acesso à câmera", err);
+                showToast("Erro ao abrir câmera");
+                stopScanner();
+            }
+        }
+
+        function stopScanner() {
+            const modal = document.getElementById('scanner-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            isScanning = false;
+
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+        }
+
+        function tickQRScan() {
+            if (!isScanning) return;
+            const video = document.getElementById('scanner-video');
+
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                const canvas = document.getElementById('scanner-canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                if (window.jsQR) {
+                    const code = jsQR(imageData.data, imageData.width, imageData.height);
+                    if (code) {
+                        document.getElementById('scan-input').value = code.data;
+                        stopScanner();
+                        toggleElement('link-input-container', true);
+                        handleLinkProcess();
+                        return;
+                    }
+                }
+            }
+            requestAnimationFrame(tickQRScan);
+        }
+
+        async function capturePhoto() {
+            const canvas = document.getElementById('scanner-canvas');
+            const video = document.getElementById('scanner-video');
+            const ctx = canvas.getContext('2d');
+
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            stopScanner();
+            showToast("Processando imagem da câmera...", true);
+
+            try {
+                const dataUrl = canvas.toDataURL('image/png');
+                const text = await performLocalOCR(dataUrl);
+                const parsedData = regexMappingParser(text);
+                addPendingItem(parsedData);
+            } catch (err) {
+                console.error(err);
+                showToast("Erro ao processar imagem");
+            }
+            hideToast();
+        }
+
+        // --- DASHBOARDS E RELATÓRIOS ---
+        function renderDashboard() {
+            const userListContainer = document.getElementById('user-stats-list');
+            const progressContainer = document.getElementById('category-progress-list');
+            const totalDisplay = document.getElementById('monthly-total-value');
+
+            const currentPeriodExpenses = expenses.filter(exp => {
+                const d = new Date(exp.date + 'T00:00:00');
+                return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+            });
+
+            const totalSum = currentPeriodExpenses.reduce((acc, curr) => acc + curr.amount, 0);
+            totalDisplay.innerText = `R$ ${totalSum.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+            // Consolidação por Usuário
+            const userTotals = {};
+            users.forEach(u => userTotals[u.name] = 0);
+            currentPeriodExpenses.forEach(exp => {
+                if (userTotals[exp.user] !== undefined) {
+                    userTotals[exp.user] += exp.amount;
+                }
+            });
+
+            userListContainer.innerHTML = Object.entries(userTotals).map(([name, sum]) => `
+                <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                    <span class="text-[9px] font-bold text-slate-400 uppercase tracking-wider">${name}</span>
+                    <span class="text-xs font-black text-slate-800">R$ ${sum.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                </div>
+            `).join('');
+
+            // Consolidação por Categoria
+            const catTotals = {};
+            categories.forEach(cat => catTotals[cat] = 0);
+            currentPeriodExpenses.forEach(exp => {
+                if (catTotals[exp.category] !== undefined) {
+                    catTotals[exp.category] += exp.amount;
+                }
+            });
+
+            const sortedCategories = Object.entries(catTotals).sort((a,b) => b[1] - a[1]).filter(item => item[1] > 0);
+
+            if (sortedCategories.length === 0) {
+                progressContainer.innerHTML = `<p class="text-center text-xs text-slate-400">Nenhuma transação registrada.</p>`;
+                return;
+            }
+
+            progressContainer.innerHTML = sortedCategories.map(([catName, amount]) => {
+                const percentage = totalSum > 0 ? (amount / totalSum) * 100 : 0;
+                return `
+                    <div class="space-y-1">
+                        <div class="flex justify-between items-center text-xs">
+                            <span class="font-extrabold text-slate-600 uppercase text-[9px]">${catName}</span>
+                            <span class="font-bold text-slate-900 text-[11px]">R$ ${amount.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})} <span class="text-[8px] text-slate-400 font-medium">(${percentage.toFixed(0)}%)</span></span>
+                        </div>
+                        <div class="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                            <div class="bg-emerald-600 h-full rounded-full transition-all duration-500" style="width: ${percentage}%"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderAnnual() {
+            const userAnnualContainer = document.getElementById('user-annual-stats');
+            const totalAnnualDisplay = document.getElementById('annual-total-value');
+            const barsContainer = document.getElementById('annual-bars-container');
+
+            document.getElementById('annual-total-title').innerText = `Total de ${currentYear}`;
+
+            const annualExpenses = expenses.filter(exp => {
+                const d = new Date(exp.date + 'T00:00:00');
+                return d.getFullYear() === currentYear;
+            });
+
+            const annualSum = annualExpenses.reduce((acc, curr) => acc + curr.amount, 0);
+            totalAnnualDisplay.innerText = `R$ ${annualSum.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+            const userTotals = {};
+            users.forEach(u => userTotals[u.name] = 0);
+            annualExpenses.forEach(exp => {
+                if (userTotals[exp.user] !== undefined) {
+                    userTotals[exp.user] += exp.amount;
+                }
+            });
+
+            userAnnualContainer.innerHTML = Object.entries(userTotals).map(([name, sum]) => `
+                <div class="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                    <span class="text-[9px] font-bold text-slate-400 uppercase tracking-wider">${name}</span>
+                    <span class="text-xs font-black text-slate-800">R$ ${sum.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
+                </div>
+            `).join('');
+
+            const monthlyTotals = Array(12).fill(0);
+            annualExpenses.forEach(exp => {
+                const d = new Date(exp.date + 'T00:00:00');
+                monthlyTotals[d.getMonth()] += exp.amount;
+            });
+
+            const maxMonthVal = Math.max(...monthlyTotals, 1);
+
+            barsContainer.innerHTML = monthlyTotals.map((val, idx) => {
+                const heightPercentage = (val / maxMonthVal) * 100;
+                return `
+                    <div class="flex-1 flex flex-col items-center group relative h-full justify-end">
+                        <div class="absolute -top-10 scale-0 group-hover:scale-100 transition-transform bg-slate-800 text-white font-bold text-[8px] py-1 px-1.5 rounded whitespace-nowrap shadow-md z-30 pointer-events-none">
+                            R$ ${val.toLocaleString('pt-BR', {maximumFractionDigits: 0})}
+                        </div>
+                        <div class="w-full bg-emerald-100 rounded-t-lg relative overflow-hidden transition-all duration-500 hover:bg-emerald-600/30" style="height: ${heightPercentage}%">
+                            <div class="absolute bottom-0 left-0 right-0 bg-emerald-600 transition-all" style="height: 100%"></div>
+                        </div>
+                        <span class="text-[7px] font-black text-slate-400 uppercase tracking-wider mt-1.5">${monthNames[idx].substring(0,3)}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // --- AJUSTES DO PAINEL DE CONTROLE ---
+        function renderConfigLists() {
+            const userList = document.getElementById('users-config-list');
+            const catList = document.getElementById('categories-config-list');
+
+            userList.innerHTML = users.map(u => {
+                const cardsHtml = u.cards && u.cards.length > 0
+                    ? u.cards.map(c => `
+                        <span class="inline-flex items-center gap-1 bg-emerald-50 text-emerald-800 border border-emerald-100 rounded px-1.5 py-0.5 text-[9px] font-bold">
+                            💳 ${c}
+                            <button onclick="removeCardFromUser('${u.id}', '${c}')" class="text-emerald-400 hover:text-red-500 transition-colors ml-0.5 font-bold">×</button>
+                        </span>
+                      `).join('')
+                    : `<span class="text-[9px] text-slate-400 italic">Sem cartões associados</span>`;
+
+                return `
+                    <div class="bg-white p-4 rounded-2xl border border-slate-100 space-y-3 shadow-sm">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <p class="text-xs font-black text-slate-700 uppercase tracking-wide">${u.name}</p>
+                                <div class="flex flex-wrap gap-1.5 mt-1.5">
+                                    ${cardsHtml}
+                                </div>
+                            </div>
+                            <button onclick="deleteUser('${u.id}')" class="text-slate-300 hover:text-red-500 transition-colors p-1">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                        <div class="flex gap-1.5 pt-2 border-t border-slate-100">
+                            <input 
+                                type="text" 
+                                id="add-card-input-${u.id}"
+                                placeholder="Final do cartão (4 dígitos)..." 
+                                class="flex-1 bg-slate-50 border border-slate-200 rounded-lg text-[9px] px-2 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500/30"
+                                maxlength="4"
+                            />
+                            <button 
+                                onclick="addCardToUser('${u.id}')"
+                                class="bg-slate-800 text-white px-2.5 py-1.5 rounded-lg text-[8px] font-black uppercase hover:bg-slate-700 active:scale-95 transition-all flex items-center gap-1"
+                            >
+                                <i data-lucide="plus" class="w-3 h-3"></i> Add
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            catList.innerHTML = categories.map(c => `
+                <span class="inline-flex items-center gap-1.5 bg-slate-50 border border-slate-100 shadow-sm pl-2.5 pr-1.5 py-1 rounded-full text-[9px] font-black text-slate-600 uppercase">
+                    ${c}
+                    <button onclick="deleteCategory('${c}')" class="text-slate-300 hover:text-red-500 transition-colors p-0.5"><i data-lucide="x" class="w-3 h-3"></i></button>
+                </span>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        function addCardToUser(userId) {
+            const input = document.getElementById(`add-card-input-${userId}`);
+            const cardVal = input.value.trim();
+
+            if (!cardVal) return;
+            if (!/^\d{4}$/.test(cardVal)) {
+                showToast("Digite exatamente 4 dígitos");
+                return;
+            }
+
+            const user = users.find(u => u.id === userId);
+            if (user) {
+                if (!user.cards) user.cards = [];
+                if (user.cards.includes(cardVal)) {
+                    showToast("Este cartão já está cadastrado");
+                    return;
+                }
+                user.cards.push(cardVal);
+                saveLocal();
+                renderConfigLists();
+                updateUI();
+                showToast("Cartão cadastrado!");
+            }
+        }
+
+        function removeCardFromUser(userId, card) {
+            const user = users.find(u => u.id === userId);
+            if (user && user.cards) {
+                user.cards = user.cards.filter(c => c !== card);
+                saveLocal();
+                renderConfigLists();
+                updateUI();
+                showToast("Cartão removido");
+            }
+        }
+
+        function handleCreateUser() {
+            const inputName = document.getElementById('new-user-input');
+            const inputCard = document.getElementById('new-user-card');
+            const name = inputName.value.trim();
+            const cardStr = inputCard.value.trim();
+
+            if (!name) return;
+
+            const cardArray = cardStr ? cardStr.split(',').map(s => s.trim()).filter(s => /^\d{4}$/.test(s)) : [];
+
+            users.push({
+                id: Date.now().toString(),
+                name: name,
+                cards: cardArray
+            });
+
+            saveLocal();
+            renderConfigLists();
+            updateUI();
+
+            inputName.value = "";
+            inputCard.value = "";
+            showToast("Usuário criado!");
+        }
+
+        function deleteUser(id) {
+            if (users.length <= 1) {
+                showToast("Mantenha ao menos um usuário ativo");
+                return;
+            }
+            users = users.filter(u => u.id !== id);
+            saveLocal();
+            renderConfigLists();
+            updateUI();
+            showToast("Usuário deletado");
+        }
+
+        function handleCreateCategory() {
+            const input = document.getElementById('new-category-input');
+            const cat = input.value.trim();
+
+            if (!cat || categories.includes(cat)) return;
+
+            categories.push(cat);
+            saveLocal();
+            renderConfigLists();
+            updateUI();
+
+            input.value = "";
+            showToast("Categoria cadastrada!");
+        }
+
+        function deleteCategory(cat) {
+            categories = categories.filter(c => c !== cat);
+            saveLocal();
+            renderConfigLists();
+            updateUI();
+            showToast("Categoria removida");
+        }
+
+        function confirmAllPending() {
+            if (pendingExpenses.length === 0) return;
+            expenses.push(...pendingExpenses);
+            pendingExpenses = [];
+            saveLocal();
+            updateUI();
+            playSuccessSound();
+            showToast("Confirmados com sucesso!");
+        }
+
+        function discardPending(id) {
+            pendingExpenses = pendingExpenses.filter(p => p.id != id);
+            renderPending();
+        }
+
+        // --- FUNÇÕES UTILITÁRIAS ---
+        function toggleElement(id, show) {
+            const el = document.getElementById(id);
+            if (show) {
+                el.classList.remove('hidden');
+            } else {
+                el.classList.add('hidden');
+            }
+        }
+
+        function focusLinkInput() {
+            toggleElement('link-input-container', true);
+            document.getElementById('scan-input').focus();
+        }
+    </script>
+</body>
+</html>
